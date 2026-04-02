@@ -3,23 +3,19 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type FilePath string
 type Command string
 
-const (
-	get Command = "get"
-	set Command = "set"
-)
-
 type Config struct {
 	args     []string
 	database FilePath
-	command  Command
 }
 
 func (config *Config) init() {
@@ -38,6 +34,8 @@ func (config *Config) init() {
 
 		config.database = FilePath(path)
 	}
+
+	query := config.readArgs()
 }
 
 func (config *Config) checkDB() bool {
@@ -54,18 +52,44 @@ func (config *Config) checkDB() bool {
 	return false
 }
 
-func (config *Config) readArgs() (string, string) {
+func (config *Config) readArgs() (*Query, error) {
 	args := os.Args[1:]
 
-	if len(args) == 0 {
-		log.Fatal("Please specify a command")
+	if len(args) < 2 {
+		log.Fatal("Please specify a command and arguments")
 	}
 
-	switch args[0] {
-	case "get":
-		config.command = get
+	command := os.Args[0]
+
+	args = args[1:]
+
+	switch command {
 	case "set":
-		config.command = set
+		if len(args) != 2 {
+			log.Fatal("Error: 'set' requires exactly 2 arguments (key, value)")
+		}
+
+		key, value := args[0], strings.Join(args[1:], "")
+		return &Query{key, value}, nil
+	case "get":
+		if len(args) != 1 {
+			log.Fatal("Error: 'get' requires exactly a single argument (key) to get")
+		}
+
+		return &Query{key: args[0]}, nil
+
+	default:
+		log.Fatal("idk")
 	}
 
+	return nil, errors.New("Couldn't read arguments")
+
+}
+
+type Query struct {
+	key   string
+	value string
+}
+
+func (query *Query) parseQuery() string {
 }

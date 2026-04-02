@@ -3,15 +3,16 @@ package main
 import (
 	"fmt"
 	// "log"
-	"os"
+	// "os"
 )
 
+type query struct {
+	value string
+	key   string
+}
+
 func main() {
-	args := os.Args
+	q := query{value: "how are you "}
 
-	fmt.Println(args[1:])
-
-	for _, word := range args[1:] {
-		fmt.Println(word)
-	}
+	fmt.Println(q)
 }
