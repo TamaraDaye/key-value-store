@@ -1,5 +1,6 @@
 #![allow(unused)]
 use core::panic::PanicInfo;
+use std::arch::x86_64::_CMP_FALSE_OQ;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -64,39 +65,62 @@ impl ViewServer {
     }
 
     fn validate_view(&mut self, tick: tokio::time::Instant) -> bool {
-        for (server, t) in self.last_ping.iter() {
-            if tick.saturating_duration_since((*t).into()) > DEAD_TIMEOUT {
+        let Some(view) = &mut self.view else {
+            return false;
+        };
+        let primary_dead =
+            tick.saturating_duration_since(self.last_ping[&view.primary].into()) > DEAD_TIMEOUT;
+        let backup_dead = view.backup.is_some_and(|server| {
+            tick.saturating_duration_since(self.last_ping[&server].into()) > DEAD_TIMEOUT
+        });
 
+        if !primary_dead && !backup_dead {
+            return false;
+        }
+
+        let mut candidates: Vec<Server> = Vec::with_capacity(2);
+
+        for (server, ping) in self.last_ping.iter() {
+            if *server == view.primary
+                || view.backup.as_ref().is_some_and(|backup| server == backup)
+            {
+                continue;
+            }
+
+            if tick.saturating_duration_since((*ping).into()) <= DEAD_TIMEOUT {
+                if candidates.len() == 2 {
+                    break;
+                }
+                candidates.push(*server);
             }
         }
+
+        Self::update_view(view, primary_dead, backup_dead, candidates);
 
         true
     }
 
-    // fn update_view(&mut self, dead_servers: &HashSet<Server>) {
-    //     let Some(view) = &mut self.view else { return };
+    fn update_view(
+        view: &mut View,
+        primary_state: bool,
+        backup_state: bool,
+        candidate_servers: Vec<Server>,
+    ) {
+        match (primary_state, backup_state) {
+            (true, false) => {
+                view.view_number += 1;
+                view.primary = view.backup.unwrap();
+                view.backup = Some(candidate_servers[0]);
+            }
 
-    //     let primary_dead = dead_servers.contains(&view.primary);
-    //     let secondary_dead = dead_servers.contains(&view.backup);
+            (false, true) => {
+                view.view_number += 1;
+                view.backup = Some(candidate_servers[0]);
+            }
 
-    //     match (primary_dead, secondary_dead) {
-    //         (true, true) => {
-    //             todo!()
-    //         }
-
-    //         (true, false) => {
-    //             view.primary = view.backup;
-    //             view.backup = todo!();
-    //             view.view_number += 1;
-    //         }
-    //         (false, true) => {
-    //             todo!()
-    //         }
-    //         (false, false) => {
-    //             return;
-    //         }
-    //     }
-    // }
+            _ => return
+        }
+    }
 
     fn find_idle_server(&self, dead_servers: &HashSet<Server>) -> Server {
         todo!()
