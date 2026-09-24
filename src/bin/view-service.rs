@@ -15,5 +15,5 @@ fn main() {
     println!("Milliseconds: {}ms", elapsed.as_millis());
     println!("Microseconds: {}µs", elapsed.as_micros());
     println!("Nanoseconds:  {}ns", elapsed.as_nanos());
-    println!("Float secs:   {}s",  elapsed.as_secs_f64());
+    println!("Float secs:   {}s", elapsed.as_secs_f64());
 }

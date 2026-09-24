@@ -1,5 +1,6 @@
 #![allow(unused)]
 use core::panic::PanicInfo;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::mpsc::{Receiver, Sender};
@@ -8,14 +9,12 @@ use std::time::{Duration, Instant};
 use std::{thread, vec};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{select, time};
-use std::cell::RefCell;
 
 type Server = SocketAddr;
 
 const PING_INTERVAL: Duration = Duration::from_millis(100);
 const DEAD_PINGS: u32 = 3;
 const DEAD_TIMEOUT: Duration = PING_INTERVAL.saturating_mul(DEAD_PINGS);
-const VIEWS: Vec<View> = vec![];
 
 pub enum Procedures {
     Get(String),
@@ -23,17 +22,22 @@ pub enum Procedures {
     Append(String, String),
 }
 
+#[derive(Clone, Debug)]
 pub struct View {
     view_number: u32,
     primary: Server,
-    secondary: Server,
-    backup: Server,
+    backup: Option<Server>,
 }
 
 pub struct ViewServer {
     view: Option<View>,
     address: SocketAddr,
     last_ping: HashMap<Server, Instant>,
+    clients: Vec<Client>,
+}
+
+pub struct Client {
+    addr: SocketAddr,
 }
 
 impl ViewServer {
@@ -44,36 +48,61 @@ impl ViewServer {
             view: None,
             address,
             last_ping: HashMap::new(),
+            clients: vec![],
         }
     }
 
     fn record_request(&mut self, server: Server) {
+        if self.view.is_none() {
+            self.view = Some(View {
+                view_number: 1,
+                primary: server,
+                backup: None,
+            })
+        }
         self.last_ping.insert(server, Instant::now());
     }
 
-    fn validate_view(&mut self, tick: Instant) {
-        let dead_servers: HashSet<Server> = self.last_ping
-            .iter()
-            .filter(|(_, t)| tick.saturating_duration_since(**t) > DEAD_TIMEOUT)
-            .map(|(server, _)| *server)
-            .collect();
+    fn validate_view(&mut self, tick: tokio::time::Instant) -> bool {
+        for (server, t) in self.last_ping.iter() {
+            if tick.saturating_duration_since((*t).into()) > DEAD_TIMEOUT {
 
-        if dead_servers.is_empty() {
-            return;
+            }
         }
 
-        self.update_view(&dead_servers);
+        true
     }
 
-    fn update_view(&mut self, dead_servers: &HashSet<Server>) { 
-    }
+    // fn update_view(&mut self, dead_servers: &HashSet<Server>) {
+    //     let Some(view) = &mut self.view else { return };
 
+    //     let primary_dead = dead_servers.contains(&view.primary);
+    //     let secondary_dead = dead_servers.contains(&view.backup);
 
-    fn is_server_in_view(&self, server: &Server) -> bool {
+    //     match (primary_dead, secondary_dead) {
+    //         (true, true) => {
+    //             todo!()
+    //         }
+
+    //         (true, false) => {
+    //             view.primary = view.backup;
+    //             view.backup = todo!();
+    //             view.view_number += 1;
+    //         }
+    //         (false, true) => {
+    //             todo!()
+    //         }
+    //         (false, false) => {
+    //             return;
+    //         }
+    //     }
+    // }
+
+    fn find_idle_server(&self, dead_servers: &HashSet<Server>) -> Server {
         todo!()
     }
 
-    fn find_idle_server(&self, dead_servers: &HashSet<Server>) -> Server {
+    async fn update_client(&mut self) {
         todo!()
     }
 }
@@ -91,11 +120,16 @@ pub async fn discover(view_server: &mut ViewServer) {
         select! {
             last_tick = interval.tick() => {
                println!("Ticker fired i guess");
+               let valid_view = view_server.validate_view(last_tick);
+            if !valid_view {
+                view_server.update_client();
             }
+        }
 
             conn = server.accept() => {
                 match conn {
-                    Ok((_stream, addr)) => {
+                    Ok((stream, addr)) => {
+                        parse_request(&stream).await;
                         view_server.record_request(addr);
                     },
                     Err(e) => todo!()
