@@ -1,37 +1,18 @@
 #![allow(unused)]
-use core::panic::PanicInfo;
-use std::arch::x86_64::_CMP_FALSE_OQ;
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::collections::{HashMap};
 use std::net::SocketAddr;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{thread, vec};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{select, time};
 
 type Server = SocketAddr;
 
-const PING_INTERVAL: Duration = Duration::from_millis(100);
-const DEAD_PINGS: u32 = 3;
-const DEAD_TIMEOUT: Duration = PING_INTERVAL.saturating_mul(DEAD_PINGS);
-const TICK_INTERVAL: Duration = Duration::from_millis(100);
-
-pub enum Procedures {
-    Get(String),
-    Put(String, String),
-    Append(String, String),
-    Ask,
-    Discover
-}
-
-#[derive(Clone, Debug)]
-pub struct View {
-    view_number: u32,
-    primary: Server,
-    backup: Option<Server>,
-}
 
 enum ServerState {
     Missing,
@@ -57,6 +38,22 @@ impl Client {
             view_server: address,
             current_view: None,
         }
+    }
+
+    fn put(key: String, value: String) -> (String, String) {
+        todo!()
+    }
+
+    async fn discover(&self)-> View {
+        let mut stream: TcpStream = TcpStream::connect(self.view_server).await.unwrap();
+        let request: Request= Request::Discover;
+        let data: Vec<u8> = serde_json::to_vec(&request).unwrap();
+        stream.write_all(&data).await.unwrap();
+        let mut buf_reader = BufReader::new(stream);
+        let mut response = String::new();
+        buf_reader.read_line(&mut response);
+        let view: View = serde_json::from_str(&response).unwrap();
+        return view
     }
 }
 
@@ -181,6 +178,21 @@ impl ViewServer {
         }
     }
 
+    pub async fn handle_connection(&self, stream: &mut TcpStream) -> Response {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: Request = serde_json::from_str(&line).unwrap();
+        match request {
+            Request::Ping => { 
+                todo!()
+            }
+            Request::Discover => { todo!() }
+        }
+
+        Response::Ack
+    }
+
     fn find_idle_server(&self, dead_servers: &HashSet<Server>) -> Server {
         todo!()
     }
@@ -190,11 +202,7 @@ impl ViewServer {
     }
 }
 
-pub struct Rpc {
-    procedure: Procedures,
-}
-
-pub async fn discover(view_server: &mut ViewServer) {
+pub async fn run(view_server: &mut ViewServer) {
     let server: TcpListener = TcpListener::bind(view_server.address).await.unwrap();
 
     let mut interval = time::interval(DEAD_TIMEOUT);
@@ -208,9 +216,8 @@ pub async fn discover(view_server: &mut ViewServer) {
 
         conn = server.accept() => {
             match conn {
-                Ok((stream, addr)) => {
-                    parse_request(&stream).await;
-                    view_server.record_request(addr);
+                Ok((mut stream, addr)) => {
+                    view_server.handle_connection(&mut stream).await;
                 },
                 Err(e) => todo!()
             };
@@ -218,5 +225,3 @@ pub async fn discover(view_server: &mut ViewServer) {
         }
     }
 }
-
-pub async fn parse_request(stream: &TcpStream) {}
