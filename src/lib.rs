@@ -16,11 +16,14 @@ type Server = SocketAddr;
 const PING_INTERVAL: Duration = Duration::from_millis(100);
 const DEAD_PINGS: u32 = 3;
 const DEAD_TIMEOUT: Duration = PING_INTERVAL.saturating_mul(DEAD_PINGS);
+const TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 pub enum Procedures {
     Get(String),
     Put(String, String),
     Append(String, String),
+    Ask,
+    Discover
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +31,12 @@ pub struct View {
     view_number: u32,
     primary: Server,
     backup: Option<Server>,
+}
+
+enum ServerState {
+    Missing,
+    Alive,
+    Dead,
 }
 
 pub struct ViewServer {
@@ -38,7 +47,17 @@ pub struct ViewServer {
 }
 
 pub struct Client {
-    addr: SocketAddr,
+    view_server: Server,
+    current_view: Option<View>,
+}
+
+impl Client {
+    fn new(address: SocketAddr) -> Client {
+        Client {
+            view_server: address,
+            current_view: None,
+        }
+    }
 }
 
 impl ViewServer {
@@ -59,24 +78,36 @@ impl ViewServer {
                 view_number: 1,
                 primary: server,
                 backup: None,
-            })
+            });
         }
+
         self.last_ping.insert(server, Instant::now());
     }
 
+    fn is_dead(&self, server: &Server, tick: tokio::time::Instant) -> bool {
+        tick.saturating_duration_since(self.last_ping[&server].into()) > DEAD_TIMEOUT
+    }
+
     fn validate_view(&mut self, tick: tokio::time::Instant) -> bool {
-        let Some(view) = &mut self.view else {
+        let Some(view) = &self.view else {
             return false;
         };
-        let primary_dead =
-            tick.saturating_duration_since(self.last_ping[&view.primary].into()) > DEAD_TIMEOUT;
-        let backup_dead = view.backup.is_some_and(|server| {
-            tick.saturating_duration_since(self.last_ping[&server].into()) > DEAD_TIMEOUT
-        });
+        let primary_state = if self.is_dead(&view.primary, tick) {
+            ServerState::Dead
+        } else {
+            ServerState::Alive
+        };
 
-        if !primary_dead && !backup_dead {
-            return false;
-        }
+        let backup_state = match view.backup {
+            None => ServerState::Missing,
+            Some(server) => {
+                if self.is_dead(&server, tick) {
+                    ServerState::Dead
+                } else {
+                    ServerState::Alive
+                }
+            }
+        };
 
         let mut candidates: Vec<Server> = Vec::with_capacity(2);
 
@@ -88,37 +119,65 @@ impl ViewServer {
             }
 
             if tick.saturating_duration_since((*ping).into()) <= DEAD_TIMEOUT {
+                candidates.push(*server);
+
                 if candidates.len() == 2 {
                     break;
                 }
-                candidates.push(*server);
             }
         }
+        let Some(view) = &mut self.view else {
+            return false;
+        };
 
-        Self::update_view(view, primary_dead, backup_dead, candidates);
-
-        true
+        return Self::update_view(view, primary_state, backup_state, candidates);
     }
 
     fn update_view(
         view: &mut View,
-        primary_state: bool,
-        backup_state: bool,
+        primary_state: ServerState,
+        backup_state: ServerState,
         candidate_servers: Vec<Server>,
-    ) {
+    ) -> bool {
         match (primary_state, backup_state) {
-            (true, false) => {
+            (ServerState::Alive, ServerState::Missing) => {
+                if let Some(server) = candidate_servers.first() {
+                    view.view_number += 1;
+                    view.backup = Some(*server);
+                    true
+                } else {
+                    false
+                }
+            }
+
+            (ServerState::Alive, ServerState::Dead) => {
+                if let Some(server) = candidate_servers.first() {
+                    view.view_number += 1;
+                    view.backup = Some(*server);
+                    true
+                } else {
+                    eprintln!("There are no idle servers for the backup");
+                    false
+                }
+            }
+            (ServerState::Dead, ServerState::Alive) => {
                 view.view_number += 1;
                 view.primary = view.backup.unwrap();
-                view.backup = Some(candidate_servers[0]);
+                if let Some(server) = candidate_servers.first() {
+                    view.backup = Some(*server)
+                } else {
+                    view.backup = None
+                }
+
+                true
             }
 
-            (false, true) => {
-                view.view_number += 1;
-                view.backup = Some(candidate_servers[0]);
+            (ServerState::Dead, ServerState::Missing) | (ServerState::Dead, ServerState::Dead) => {
+                eprintln!("There's no new primary twin");
+                false
             }
 
-            _ => return
+            _ => false,
         }
     }
 
@@ -142,23 +201,20 @@ pub async fn discover(view_server: &mut ViewServer) {
 
     loop {
         select! {
-            last_tick = interval.tick() => {
-               println!("Ticker fired i guess");
-               let valid_view = view_server.validate_view(last_tick);
-            if !valid_view {
-                view_server.update_client();
-            }
+        last_tick = interval.tick() => {
+            println!("Ticker fired i guess");
+            let view_changed = view_server.validate_view(last_tick);
         }
 
-            conn = server.accept() => {
-                match conn {
-                    Ok((stream, addr)) => {
-                        parse_request(&stream).await;
-                        view_server.record_request(addr);
-                    },
-                    Err(e) => todo!()
-                };
-            }
+        conn = server.accept() => {
+            match conn {
+                Ok((stream, addr)) => {
+                    parse_request(&stream).await;
+                    view_server.record_request(addr);
+                },
+                Err(e) => todo!()
+            };
+        }
         }
     }
 }
