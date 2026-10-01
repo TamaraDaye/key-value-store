@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-type Server = SocketAddr;
+pub type Server = SocketAddr;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -13,21 +13,21 @@ pub enum Request {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
-enum Response {
+pub enum Response {
     View(View),
     Ack,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
-    view_number: u32,
-    primary: Server,
-    backup: Option<Server>,
+    pub view_number: u32,
+    pub primary: Server,
+    pub backup: Option<Server>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
-enum Procedure {
+pub enum Procedure {
     Response,
     Request,
 }
