@@ -173,7 +173,10 @@ impl ViewServer {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    let mut view_server = ViewServer{ view: None, address: "127.0.0.1:9999".parse().unwrap(), last_ping :HashMap::new()};
+    run(&mut view_server).await;
     println!("Hello, world!");
 }
 
