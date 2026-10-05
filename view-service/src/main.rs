@@ -154,7 +154,7 @@ impl ViewServer {
         reader.read_line(&mut line).await.unwrap();
         let request: Request = serde_json::from_str(&line).unwrap();
         match request {
-            Request::Ping => {
+            Request::Ping(view_num)=> {
                 self.record_request(server);
                 self.process_view(Instant::now());
             }

@@ -8,7 +8,7 @@ pub type Server = SocketAddr;
 #[serde(tag = "type")]
 pub enum Request {
     Discover,
-    Ping,
+    Ping(usize),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,4 +30,12 @@ pub struct View {
 pub enum Procedure {
     Response,
     Request,
+}
+
+
+#[derive(Serialize, Deserialize)]
+pub enum DatabaseStub {
+    Put(String, String),
+    Get(String),
+    Append(String, String)
 }
