@@ -5,14 +5,14 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-pub struct Client {
+pub struct Clerk {
     view_server: Server,
     current_view: Option<View>,
 }
 
-impl Client {
-    fn new(address: SocketAddr) -> Client {
-        Client {
+impl Clerk {
+    fn new(address: SocketAddr) -> Clerk {
+        Clerk {
             view_server: address,
             current_view: None,
         }
@@ -28,14 +28,14 @@ impl Client {
 
     async fn put(&self, key: String, value: String) -> (String, String) {
         let mut connection : TcpStream = self.connect_to_db().await;
-        let data = DatabaseStub::Put(key, value).serialize_request().unwrap();
+        let data = DatabaseStub::Put(key, value).serialize().unwrap();
         connection.write_all(&data).await.unwrap();
         todo!()
     }
 
     async fn get(&self, key: String) -> String {
         let mut connection : TcpStream = self.connect_to_db().await;
-        let data = DatabaseStub::Get(key).serialize_request().unwrap();
+        let data = DatabaseStub::Get(key).serialize().unwrap();
         connection.write_all(&data).await.unwrap();
         let mut buf_reader = BufReader::new(connection);
         let mut response = String::new();
@@ -45,13 +45,13 @@ impl Client {
 
     async fn append(&self, key: String, value: String) {
         let mut connection : TcpStream = self.connect_to_db().await;
-        let data = DatabaseStub::Put(key, value).serialize_request().unwrap();
+        let data = DatabaseStub::Put(key, value).serialize().unwrap();
         connection.write_all(&data).await.unwrap();
     }
 
     async fn discover(&self) -> View {
         let mut connection : TcpStream = TcpStream::connect(self.view_server).await.unwrap();
-        let data = Request::Discover.serialize_request().unwrap();
+        let data = Request::Discover.serialize().unwrap();
         connection.write_all(&data).await.unwrap();
         let mut buf_reader = BufReader::new(connection);
         let mut response = String::new();

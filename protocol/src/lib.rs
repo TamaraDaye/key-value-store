@@ -3,12 +3,12 @@ use serde::{Serialize,  de::DeserializeOwned, Deserialize};
 use std::net::SocketAddr;
 
 pub trait SerdeData: Serialize + DeserializeOwned + Sized {
-    fn serialize_request(&self) -> serde_json::Result<Vec<u8>> { 
-        let mut request = serde_json::to_vec(self)?;
-        request.push(b'\n');
-        Ok(request)
+    fn serialize(&self) -> serde_json::Result<Vec<u8>> { 
+        let mut data = serde_json::to_vec(self)?;
+        data.push(b'\n');
+        Ok(data)
     }
-    fn deserialize_request(bytes: &[u8]) -> serde_json::Result<Self>{ 
+    fn deserialize(bytes: &[u8]) -> serde_json::Result<Self>{ 
         serde_json::from_slice(bytes)
     }
 }
@@ -21,14 +21,14 @@ pub type Server = SocketAddr;
 #[serde(tag = "type")]
 pub enum Request {
     Discover,
-    Ping{view: usize},
+    Ping{view: u32},
 }
 
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Response {
-    View(View),
+    View(Option<View>),
     Ack,
 }
 

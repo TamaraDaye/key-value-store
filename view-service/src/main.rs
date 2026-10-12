@@ -1,5 +1,5 @@
 #![allow(unused)]
-use protocol::{Request, Response, Server, View};
+use protocol::{Request, Response, SerdeData, Server, View};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -23,6 +23,7 @@ pub struct ViewServer {
     view: Option<View>,
     address: SocketAddr,
     last_ping: HashMap<Server, Instant>,
+    acked_view: Option<u32>,
 }
 
 impl ViewServer {
@@ -33,11 +34,16 @@ impl ViewServer {
             view: None,
             address,
             last_ping: HashMap::new(),
+            acked_view: None,
         }
     }
 
-    fn record_request(&mut self, server: Server) {
-        if self.view.is_none() {
+    fn record_request(&mut self, server: Server, view_num: u32) {
+        if let Some(view) = &self.view {
+            if server == view.primary && view_num == view.view_number {
+                self.acked_view = Some(view_num)
+            }
+        } else {
             self.view = Some(View {
                 view_number: 1,
                 primary: server,
@@ -48,15 +54,18 @@ impl ViewServer {
         self.last_ping.insert(server, Instant::now());
     }
 
-    fn is_dead(&self, server: &Server, tick: tokio::time::Instant) -> bool {
-        tick.saturating_duration_since(self.last_ping[&server].into()) > DEAD_TIMEOUT
+    fn is_dead(&self, server: &Server, tick: Instant) -> bool {
+        match self.last_ping.get(server) {
+            Some(last_ping) => tick.saturating_duration_since((*last_ping).into()) > DEAD_TIMEOUT,
+            None => true,
+        }
     }
-
     fn process_view(&mut self, tick: tokio::time::Instant) -> bool {
         let (primary_state, backup_state, candidates) = {
             let Some(view) = &self.view else {
                 return false;
             };
+
             let primary_state = if self.is_dead(&view.primary, tick) {
                 ServerState::Dead
             } else {
@@ -93,9 +102,14 @@ impl ViewServer {
             }
             (primary_state, backup_state, candidates)
         };
+
         let Some(view) = &mut self.view else {
             return false;
         };
+
+        if self.acked_view != Some(view.view_number) {
+            return false;
+        }
 
         return Self::update_view(view, primary_state, backup_state, candidates);
     }
@@ -148,24 +162,24 @@ impl ViewServer {
         }
     }
 
-    pub async fn handle_connection(&mut self, stream: &mut TcpStream, server: Server) -> Response {
+    pub async fn handle_connection(&mut self, stream: &mut TcpStream, server: Server) {
         let mut reader = BufReader::new(&mut *stream);
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let request: Request = serde_json::from_str(&line).unwrap();
+
         match request {
-            Request::Ping(view_num)=> {
-                self.record_request(server);
+            Request::Ping { view } => {
+                self.record_request(server, view);
                 self.process_view(Instant::now());
+                let response = Response::View(self.view.clone()).serialize().unwrap();
+                stream.write_all(&response).await;
             }
             Request::Discover => {
-                let mut view = serde_json::to_vec(&self.view).unwrap();
-                view.push(b'\n');
-                stream.write_all(&view).await;
+                let response = Response::View(self.view.clone()).serialize().unwrap();
+                stream.write_all(&response).await;
             }
         }
-
-        Response::Ack
     }
 
     async fn update_client(&mut self) {
@@ -175,7 +189,12 @@ impl ViewServer {
 
 #[tokio::main]
 async fn main() {
-    let mut view_server = ViewServer{ view: None, address: "127.0.0.1:9999".parse().unwrap(), last_ping :HashMap::new()};
+    let mut view_server = ViewServer {
+        view: None,
+        address: "127.0.0.1:9999".parse().unwrap(),
+        last_ping: HashMap::new(),
+        acked_view: None,
+    };
     run(&mut view_server).await;
     println!("Hello, world!");
 }
@@ -183,7 +202,7 @@ async fn main() {
 pub async fn run(view_server: &mut ViewServer) {
     let server: TcpListener = TcpListener::bind(view_server.address).await.unwrap();
 
-    let mut interval = interval(DEAD_TIMEOUT);
+    let mut interval = interval(PING_INTERVAL);
 
     loop {
         select! {
