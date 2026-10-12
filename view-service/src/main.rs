@@ -7,11 +7,30 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::time::{Instant, interval};
+use thiserror::Error;
+use std::error;
+
 
 const PING_INTERVAL: Duration = Duration::from_millis(100);
 const DEAD_PINGS: u32 = 3;
 const DEAD_TIMEOUT: Duration = PING_INTERVAL.saturating_mul(DEAD_PINGS);
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
+
+
+#[derive(Error, Debug)]
+pub enum NetworkError {
+    #[error("failed to read request")]
+    Read(#[source] std::io::Error),
+
+    #[error("malformed request")]
+    BadRequest(#[source] serde_json::Error),
+
+    #[error("failed to serialize response")]
+    Serialize(#[source] serde_json::Error), // adjust to whatever .serialize() returns
+
+    #[error("failed to write response")]
+    Write(#[source] std::io::Error),
+}
 
 enum ServerState {
     Missing,
@@ -27,12 +46,11 @@ pub struct ViewServer {
 }
 
 impl ViewServer {
-    fn new() -> ViewServer {
-        let address: SocketAddr = "127.0.0.1:6479".parse().unwrap();
+    fn new(ip: SocketAddr) -> ViewServer {
 
         ViewServer {
             view: None,
-            address,
+            address: ip,
             last_ping: HashMap::new(),
             acked_view: None,
         }
@@ -162,24 +180,31 @@ impl ViewServer {
         }
     }
 
-    pub async fn handle_connection(&mut self, stream: &mut TcpStream, server: Server) {
+    pub async fn handle_connection(&mut self, stream: &mut TcpStream, server: Server) -> Result<(), NetworkError>{
         let mut reader = BufReader::new(&mut *stream);
         let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let request: Request = serde_json::from_str(&line).unwrap();
+        let n = reader.read_line(&mut line).await.map_err(NetworkError::Read)?;
+        if n == 0 {
+            return Ok(())
+        }
+
+        let request: Request = serde_json::from_str(&line).map_err(NetworkError::BadRequest)?;
 
         match request {
             Request::Ping { view } => {
                 self.record_request(server, view);
                 self.process_view(Instant::now());
-                let response = Response::View(self.view.clone()).serialize().unwrap();
-                stream.write_all(&response).await;
+                let response = Response::View(self.view.clone()).serialize().map_err(NetworkError::Serialize)?;
+                stream.write_all(&response).await.map_err(NetworkError::Write);
             }
             Request::Discover => {
                 let response = Response::View(self.view.clone()).serialize().unwrap();
                 stream.write_all(&response).await;
+                stream.write_all(&response).await.map_err(NetworkError::Write);
             }
         }
+
+        Ok(())
     }
 
     async fn update_client(&mut self) {
@@ -189,14 +214,6 @@ impl ViewServer {
 
 #[tokio::main]
 async fn main() {
-    let mut view_server = ViewServer {
-        view: None,
-        address: "127.0.0.1:9999".parse().unwrap(),
-        last_ping: HashMap::new(),
-        acked_view: None,
-    };
-    run(&mut view_server).await;
-    println!("Hello, world!");
 }
 
 pub async fn run(view_server: &mut ViewServer) {
