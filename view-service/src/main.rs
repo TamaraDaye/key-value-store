@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, interval};
 
+
 use tokio::sync::{mpsc, oneshot};
 
 const PING_INTERVAL: Duration = Duration::from_millis(100);
@@ -42,6 +43,7 @@ enum ActorEvent {
     Rpc {
         server: Server,
         request: Request,
+        received_at: Instant,
         reply_tx: oneshot::Sender<Response>,
     },
 }
@@ -63,7 +65,7 @@ impl ViewServer {
         }
     }
 
-    fn record_request(&mut self, server: Server, view_num: u32) {
+    fn record_request(&mut self, server: Server, view_num: u32, time: Instant) {
         if let Some(view) = &self.view {
             if server == view.primary && view_num == view.view_number {
                 self.acked_view = Some(view_num)
@@ -76,7 +78,7 @@ impl ViewServer {
             });
         }
 
-        self.last_ping.insert(server, Instant::now());
+        self.last_ping.insert(server, time);
     }
 
     fn is_dead(&self, server: &Server, tick: Instant) -> bool {
@@ -195,32 +197,27 @@ impl ViewServer {
 #[tokio::main]
 async fn main() {}
 
-pub async fn run_actor(view_server: &mut ViewServer, mut rx: mpsc::Receiver<ActorEvent>) {
-    while let Some(event) = rx.recv().await {
-        match event {
-            ActorEvent::Tick(now) => {
-                view_server.process_view(now);
-            }
+//TODO: refactor the actor to use multiple queues for each event 
+//create seperate event for ping, timer, and discover biased ensures ping 
+//requests fire first 
 
-            ActorEvent::Rpc {
-                server,
-                request,
-                reply_tx,
-            } => {
-                let response = match request {
-                    Request::Ping { server, view } => {
-                        view_server.record_request(server, view);
-                        view_server.process_view(Instant::now());
-                        Response::View(view_server.view.clone())
-                    }
+pub async fn run_actor(
+    view_server: &mut ViewServer,
+    mut ping_rx: mpsc::Receiver<ActorEvent>,
+    mut time_rx: mpsc::Receiver<ActorEvent>,
+    mut discover_rx: mpsc::Receiver<ActorEvent>,
+) {
 
-                    Request::Discover => Response::View(view_server.view.clone()),
-                };
 
-                let _ = reply_tx.send(response);
+    loop {
+        tokio::select! {
+            biased;
+
+            Some(ping) = ping_rx.recv() => {
             }
         }
     }
+
 }
 
 pub async fn run_timer(tx: mpsc::Sender<ActorEvent>) {
@@ -240,12 +237,18 @@ async fn run_network(listener: TcpListener, tx: mpsc::Sender<ActorEvent>) {
         tokio::spawn(async move {
             let mut reader = BufReader::new(&mut stream);
             let mut line = String::new();
+            let received_at = Instant::now();
 
             if reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 if let Ok(request) = serde_json::from_str::<Request>(&line) {
                     let (reply_tx, reply_rx) = oneshot::channel();
 
-                    let event = ActorEvent::Rpc { server: addr, request, reply_tx };
+                    let event = ActorEvent::Rpc {
+                        server: addr,
+                        request,
+                        reply_tx,
+                        received_at,
+                    };
 
                     if tx.send(event).await.is_ok() {
                         if let Ok(response) = reply_rx.await {

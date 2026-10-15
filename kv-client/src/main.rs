@@ -10,6 +10,12 @@ pub struct Clerk {
     current_view: Option<View>,
 }
 
+//TODO: introduce server side cachinng to avoid multiple discover calls, 
+//calls should only be made if the primary refuses the connection. 
+//
+//
+//
+//
 impl Clerk {
     fn new(address: SocketAddr) -> Clerk {
         Clerk {
