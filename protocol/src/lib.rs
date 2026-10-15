@@ -21,7 +21,7 @@ pub type Server = SocketAddr;
 #[serde(tag = "type")]
 pub enum Request {
     Discover,
-    Ping{view: u32},
+    Ping{server: Server, view: u32},
 }
 
 

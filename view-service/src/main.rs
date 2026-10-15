@@ -1,21 +1,20 @@
 #![allow(unused)]
 use protocol::{Request, Response, SerdeData, Server, View};
 use std::collections::HashMap;
+use std::error;
 use std::net::SocketAddr;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::select;
 use tokio::time::{Instant, interval};
-use thiserror::Error;
-use std::error;
 
+use tokio::sync::{mpsc, oneshot};
 
 const PING_INTERVAL: Duration = Duration::from_millis(100);
 const DEAD_PINGS: u32 = 3;
 const DEAD_TIMEOUT: Duration = PING_INTERVAL.saturating_mul(DEAD_PINGS);
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
-
 
 #[derive(Error, Debug)]
 pub enum NetworkError {
@@ -38,6 +37,15 @@ enum ServerState {
     Dead,
 }
 
+enum ActorEvent {
+    Tick(Instant),
+    Rpc {
+        server: Server,
+        request: Request,
+        reply_tx: oneshot::Sender<Response>,
+    },
+}
+
 pub struct ViewServer {
     view: Option<View>,
     address: SocketAddr,
@@ -47,7 +55,6 @@ pub struct ViewServer {
 
 impl ViewServer {
     fn new(ip: SocketAddr) -> ViewServer {
-
         ViewServer {
             view: None,
             address: ip,
@@ -180,62 +187,75 @@ impl ViewServer {
         }
     }
 
-    pub async fn handle_connection(&mut self, stream: &mut TcpStream, server: Server) -> Result<(), NetworkError>{
-        let mut reader = BufReader::new(&mut *stream);
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await.map_err(NetworkError::Read)?;
-        if n == 0 {
-            return Ok(())
-        }
-
-        let request: Request = serde_json::from_str(&line).map_err(NetworkError::BadRequest)?;
-
-        match request {
-            Request::Ping { view } => {
-                self.record_request(server, view);
-                self.process_view(Instant::now());
-                let response = Response::View(self.view.clone()).serialize().map_err(NetworkError::Serialize)?;
-                stream.write_all(&response).await.map_err(NetworkError::Write);
-            }
-            Request::Discover => {
-                let response = Response::View(self.view.clone()).serialize().unwrap();
-                stream.write_all(&response).await;
-                stream.write_all(&response).await.map_err(NetworkError::Write);
-            }
-        }
-
-        Ok(())
-    }
-
     async fn update_client(&mut self) {
         todo!()
     }
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() {}
+
+pub async fn run_actor(view_server: &mut ViewServer, mut rx: mpsc::Receiver<ActorEvent>) {
+    while let Some(event) = rx.recv().await {
+        match event {
+            ActorEvent::Tick(now) => {
+                view_server.process_view(now);
+            }
+
+            ActorEvent::Rpc {
+                server,
+                request,
+                reply_tx,
+            } => {
+                let response = match request {
+                    Request::Ping { server, view } => {
+                        view_server.record_request(server, view);
+                        view_server.process_view(Instant::now());
+                        Response::View(view_server.view.clone())
+                    }
+
+                    Request::Discover => Response::View(view_server.view.clone()),
+                };
+
+                let _ = reply_tx.send(response);
+            }
+        }
+    }
 }
 
-pub async fn run(view_server: &mut ViewServer) {
-    let server: TcpListener = TcpListener::bind(view_server.address).await.unwrap();
-
-    let mut interval = interval(PING_INTERVAL);
+pub async fn run_timer(tx: mpsc::Sender<ActorEvent>) {
+    let mut ticker = interval(PING_INTERVAL);
 
     loop {
-        select! {
-        last_tick = interval.tick() => {
-            println!("Ticker fired i guess");
-            let view_changed = view_server.process_view(last_tick);
+        let now = ticker.tick().await;
+        if tx.send(ActorEvent::Tick(now)).await.is_err() {
+            break;
         }
+    }
+}
 
-        conn = server.accept() => {
-            match conn {
-                Ok((mut stream, addr)) => {
-                    view_server.handle_connection(&mut stream, addr).await;
-                },
-                Err(e) => todo!()
-            };
-        }
-        }
+async fn run_network(listener: TcpListener, tx: mpsc::Sender<ActorEvent>) {
+    while let Ok((mut stream, addr)) = listener.accept().await {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+
+            if reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                if let Ok(request) = serde_json::from_str::<Request>(&line) {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+
+                    let event = ActorEvent::Rpc { server: addr, request, reply_tx };
+
+                    if tx.send(event).await.is_ok() {
+                        if let Ok(response) = reply_rx.await {
+                            if let Ok(bytes) = response.serialize() {
+                                let _ = stream.write_all(&bytes).await;
+                            }
+                        }
+                    }
+                };
+            }
+        });
     }
 }

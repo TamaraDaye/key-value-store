@@ -39,13 +39,13 @@ impl Clerk {
         connection.write_all(&data).await.unwrap();
         let mut buf_reader = BufReader::new(connection);
         let mut response = String::new();
-        buf_reader.read_line(&mut response);
+        buf_reader.read_line(&mut response).await;
         return response;
     }
 
     async fn append(&self, key: String, value: String) {
         let mut connection: TcpStream = self.connect_to_db().await;
-        let data = DatabaseStub::Put(key, value).serialize().unwrap();
+        let data = DatabaseStub::Append(key, value).serialize().unwrap();
         connection.write_all(&data).await.unwrap();
     }
 
