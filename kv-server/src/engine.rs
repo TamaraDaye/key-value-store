@@ -22,6 +22,7 @@ pub struct SkipNode {
     pub value: ValueEntry,
     pub height: u8,
     pub next: [u32; MAX_HEIGHT],
+    pub seq_number: u32,
 }
 
 pub struct MemTable {
@@ -38,6 +39,7 @@ impl MemTable {
             value: ValueEntry::Tombstone,
             height: MAX_HEIGHT as u8,
             next: [NULL_IDX; MAX_HEIGHT],
+            seq_number: 0,
         };
 
         let mut nodes = Vec::with_capacity(4096);
@@ -82,30 +84,28 @@ impl MemTable {
         height.min(MAX_HEIGHT)
     }
 
-    fn find_predecessors(&self, target_key: &[u8]) -> ([u32; MAX_HEIGHT], Option<u32>) { 
+    fn find_predecessors(&self, target_key: &[u8]) -> ([u32; MAX_HEIGHT], Option<u32>) {
         let mut update = [0u32; MAX_HEIGHT];
         let mut curr = 0u32;
-
 
         for level in (0..self.current_max_height).rev() {
             loop {
                 let next = self.nodes[curr as usize].next[level];
                 if next == NULL_IDX {
-                    break
+                    break;
                 };
                 let next_key = self.get_bytes(self.nodes[next as usize].key);
 
-
                 match next_key.cmp(target_key) {
-                    Ordering::Less => curr = next, 
+                    Ordering::Less => curr = next,
                     Ordering::Equal => {
-                        update[level] = curr; 
+                        update[level] = curr;
                         if level == 0 {
-                            return (update, Some(next))
+                            return (update, Some(next));
                         }
                         break;
                     }
-                    Ordering::Greater => break, 
+                    Ordering::Greater => break,
                 }
             }
             update[level] = curr;
@@ -113,18 +113,19 @@ impl MemTable {
 
         let candidate = self.nodes[curr as usize].next[0];
 
-        let exact_match = if candidate != NULL_IDX && self.get_bytes(self.nodes[candidate as usize].key) == target_key {
+        let exact_match = if candidate != NULL_IDX
+            && self.get_bytes(self.nodes[candidate as usize].key) == target_key
+        {
             Some(candidate)
         } else {
-                None
-            };
+            None
+        };
 
         (update, exact_match)
     }
 
-
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
-        let val_slice = self.alloc_bytes(value); 
+        let val_slice = self.alloc_bytes(value);
         self.insert_entry(key, ValueEntry::Value(val_slice));
     }
 
@@ -133,6 +134,41 @@ impl MemTable {
     }
 
     fn insert_entry(&mut self, key: &[u8], value_entry: ValueEntry) {
-        todo!()
+        let (mut update, exact_match) = self.find_predecessors(key);
+
+
+        if let Some(existing_idx) = exact_match {
+            self.nodes[existing_idx as usize].value = value_entry;
+            return;
+        }
+
+        let height = self.random_height();
+
+        if height > self.current_max_height {
+            for level in self.current_max_height..height {
+                update[level] = 0
+            }
+            self.current_max_height = height;
+        };
+
+        let key_slice = self.alloc_bytes(key);
+        let new_node_idx = self.nodes.len() as u32;
+
+        let mut new_node = SkipNode {
+            key: key_slice, 
+            value: value_entry, 
+            height: height as u8, 
+            seq_number: 0, 
+            next: [NULL_IDX; MAX_HEIGHT], 
+        };
+
+
+        for level in 0..height {
+            let prev_idx = update[level] as usize; 
+            new_node.next[level] = self.nodes[prev_idx].next[level];
+            self.nodes[prev_idx].next[level] = new_node_idx;
+        }
+
+        self.nodes.push(new_node);
     }
 }
