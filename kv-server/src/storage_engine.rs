@@ -1,5 +1,7 @@
 #![allow(unused)]
 use std::cmp::Ordering;
+use std::collections::{VecDeque, BinaryHeap};
+use std::sync::Arc;
 
 const MAX_HEIGHT: usize = 16;
 const NULL_IDX: u32 = u32::MAX;
@@ -30,6 +32,8 @@ pub struct MemTable {
     nodes: Vec<SkipNode>,
     current_max_height: usize,
     rng_state: u64,
+    active_memtable, 
+    frozen_memtables: Vec<Arc<MemTable>>
 }
 
 impl MemTable {
