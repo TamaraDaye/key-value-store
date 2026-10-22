@@ -2,10 +2,13 @@
 use std::cmp::Ordering;
 use std::collections::{VecDeque, BinaryHeap};
 use std::sync::Arc;
+use std::fs::File;
+use std::path::PathBuf;
 
 const MAX_HEIGHT: usize = 16;
 const NULL_IDX: u32 = u32::MAX;
 const MEMTABLE_SIZE: usize = 16 << 20;
+const RNG_STATE: usize = 0x853c49e6748fea9b;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ByteSlice {
@@ -13,10 +16,89 @@ pub struct ByteSlice {
     pub len: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 pub enum ValueEntry {
     Value(ByteSlice),
+    #[default]
     Tombstone,
+}
+
+struct DbPaths {
+    root: PathBuf,
+    wal_dir: PathBuf, 
+    sst_dir: PathBuf, 
+}
+
+
+impl DbPaths {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            wal_dir: root.join("wal"), 
+            sst_dir: root.join("sst"), 
+            root
+        }
+    }
+}
+
+pub struct Wal  {
+    file: File, 
+    size: usize, 
+    enabled: bool,
+    version: usize
+}
+
+
+pub struct WalManager {
+}
+
+pub struct WalRecord { 
+    record_hash: Vec<u8>, //4bytes 
+    record_size: u32, 
+    operation: u32,
+    sequence_number: u32,
+    key_length: u32, 
+    key: Vec<u8>, 
+    value_length: Vec<u8>, 
+    value: Vec<u8>
+}
+
+
+impl WalManager {
+    fn write() {}
+    fn read() {}
+}
+
+impl Wal {
+    fn new(dir: PathBuf, version: usize) -> Self {
+        let wal_path = dir.join(format!("wal{}", version));
+
+        let f = File::create_new(wal_path).unwrap();
+
+        Self {
+            file: f, 
+            size: 0, 
+            enabled: false, 
+            version: version
+        }
+    }
+
+
+    fn disable_wal(&mut self) {
+        self.enabled = false
+    }
+
+}
+
+
+pub struct Engine {
+    wal: Wal, 
+    ssfile: SSTfile, 
+    active_memtable: MemTable, 
+    frozen_memtables: Option<VecDeque<Arc<MemTable>>>
+}
+
+pub struct SSTfile {
+
 }
 
 pub struct SkipNode {
@@ -27,17 +109,17 @@ pub struct SkipNode {
     pub seq_number: u32,
 }
 
+
 pub struct MemTable {
+    column_family: String,
     byte_arena: Vec<u8>,
     nodes: Vec<SkipNode>,
     current_max_height: usize,
-    rng_state: u64,
-    active_memtable, 
-    frozen_memtables: Vec<Arc<MemTable>>
+    rng_state: usize,
 }
 
 impl MemTable {
-    pub fn new(capacity_bytes: usize) -> Self {
+    pub fn new(capacity_bytes: usize, column_family: String) -> Self {
         let head = SkipNode {
             key: ByteSlice::default(),
             value: ValueEntry::Tombstone,
@@ -54,7 +136,8 @@ impl MemTable {
             byte_arena: Vec::with_capacity(capacity_bytes),
             nodes,
             current_max_height: 1,
-            rng_state: 0x853c49e6748fea9b,
+            rng_state: RNG_STATE,
+            column_family
         }
     }
 

@@ -1,6 +1,6 @@
 #![allow(unused)]
 use serde::{Serialize,  de::DeserializeOwned, Deserialize};
-use std::net::SocketAddr;
+use std::{collections::HashMap, net::SocketAddr};
 
 pub trait SerdeData: Serialize + DeserializeOwned + Sized {
     fn serialize(&self) -> serde_json::Result<Vec<u8>> { 
@@ -46,10 +46,18 @@ pub enum Procedure {
     Request,
 }
 
+//certain operations should be atomic e.g writes
 #[derive(Serialize, Deserialize)]
 pub enum DatabaseStub {
+    Create(String), 
     Put(String, String),
     Get(String),
     Append(String, String),
+    Write(HashMap<String, String>), //atomic writes, 
+    MultiGet(Vec<String>), 
+    SingleDelete(String),
+    NewIterator,
+    Snapshot,
+    CreateColumn(String) //serves as a namespace
 }
 
