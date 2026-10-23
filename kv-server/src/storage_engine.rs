@@ -1,9 +1,9 @@
 #![allow(unused)]
 use std::cmp::Ordering;
-use std::collections::{VecDeque, BinaryHeap};
-use std::sync::Arc;
+use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const MAX_HEIGHT: usize = 16;
 const NULL_IDX: u32 = u32::MAX;
@@ -25,43 +25,63 @@ pub enum ValueEntry {
 
 struct DbPaths {
     root: PathBuf,
-    wal_dir: PathBuf, 
-    sst_dir: PathBuf, 
+    wal_dir: PathBuf,
+    sst_dir: PathBuf,
 }
-
 
 impl DbPaths {
     fn new(root: PathBuf) -> Self {
         Self {
-            wal_dir: root.join("wal"), 
-            sst_dir: root.join("sst"), 
-            root
+            wal_dir: root.join("wal"),
+            sst_dir: root.join("sst"),
+            root,
         }
     }
 }
 
-pub struct Wal  {
-    file: File, 
-    size: usize, 
+pub struct Wal {
+    file: File,
+    size: usize,
     enabled: bool,
-    version: usize
+    version: usize,
 }
-
 
 pub struct WalManager {
+    blocks: u32,
+    active_block: u32,
 }
 
-pub struct WalRecord { 
-    record_hash: Vec<u8>, //4bytes 
-    record_size: u32, 
-    operation: u32,
-    sequence_number: u32,
-    key_length: u32, 
-    key: Vec<u8>, 
-    value_length: Vec<u8>, 
-    value: Vec<u8>
+pub struct WalRecord {
+    sequence_number: u64,
+    operation: Operation,
 }
 
+pub struct FragmentHeader {
+    chekcsum: u32,
+    fragment: FragmentType,
+    payload_length: u32,
+}
+
+enum Operation {
+    Put {
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
+    Create{column: String},
+    Append,
+    Write,
+    SingleDelete,
+}
+
+enum FragmentType {
+    Full,
+    First,
+    Middle,
+    Last,
+}
 
 impl WalManager {
     fn write() {}
@@ -75,30 +95,30 @@ impl Wal {
         let f = File::create_new(wal_path).unwrap();
 
         Self {
-            file: f, 
-            size: 0, 
-            enabled: false, 
-            version: version
+            file: f,
+            size: 0,
+            enabled: false,
+            version: version,
         }
     }
-
 
     fn disable_wal(&mut self) {
         self.enabled = false
     }
-
 }
-
 
 pub struct Engine {
-    wal: Wal, 
-    ssfile: SSTfile, 
-    active_memtable: MemTable, 
-    frozen_memtables: Option<VecDeque<Arc<MemTable>>>
+    wal: Wal,
+    ssfile: SSTfile,
+    active_memtable: MemTable,
+    frozen_memtables: Option<VecDeque<Arc<MemTable>>>,
 }
 
-pub struct SSTfile {
-
+pub struct SSTfile { 
+    index_block: Vec<u8>, 
+    filter_block: Vec<u8>, 
+    magic: u64,
+    data_size: u64,
 }
 
 pub struct SkipNode {
@@ -108,7 +128,6 @@ pub struct SkipNode {
     pub next: [u32; MAX_HEIGHT],
     pub seq_number: u32,
 }
-
 
 pub struct MemTable {
     column_family: String,
@@ -137,7 +156,7 @@ impl MemTable {
             nodes,
             current_max_height: 1,
             rng_state: RNG_STATE,
-            column_family
+            column_family,
         }
     }
 
@@ -223,7 +242,6 @@ impl MemTable {
     fn insert_entry(&mut self, key: &[u8], value_entry: ValueEntry) {
         let (mut update, exact_match) = self.find_predecessors(key);
 
-
         if let Some(existing_idx) = exact_match {
             self.nodes[existing_idx as usize].value = value_entry;
             return;
@@ -242,16 +260,15 @@ impl MemTable {
         let new_node_idx = self.nodes.len() as u32;
 
         let mut new_node = SkipNode {
-            key: key_slice, 
-            value: value_entry, 
-            height: height as u8, 
-            seq_number: 0, 
-            next: [NULL_IDX; MAX_HEIGHT], 
+            key: key_slice,
+            value: value_entry,
+            height: height as u8,
+            seq_number: 0,
+            next: [NULL_IDX; MAX_HEIGHT],
         };
 
-
         for level in 0..height {
-            let prev_idx = update[level] as usize; 
+            let prev_idx = update[level] as usize;
             new_node.next[level] = self.nodes[prev_idx].next[level];
             self.nodes[prev_idx].next[level] = new_node_idx;
         }
