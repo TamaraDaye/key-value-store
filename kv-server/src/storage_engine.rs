@@ -2,8 +2,12 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::cell::Cell;
+use crate::wal::Wal;
+
 
 const MAX_HEIGHT: usize = 16;
 const NULL_IDX: u32 = u32::MAX;
@@ -22,90 +26,14 @@ pub enum ValueEntry {
     #[default]
     Tombstone,
 }
-
-struct DbPaths {
-    root: PathBuf,
-    wal_dir: PathBuf,
-    sst_dir: PathBuf,
+pub struct RowEntry {
+    key_length: u32,
+    key: Vec<u8>,
+    length: u32,
+    value: Vec<u8>,
 }
 
-impl DbPaths {
-    fn new(root: PathBuf) -> Self {
-        Self {
-            wal_dir: root.join("wal"),
-            sst_dir: root.join("sst"),
-            root,
-        }
-    }
-}
 
-pub struct Wal {
-    file: File,
-    size: usize,
-    enabled: bool,
-    version: usize,
-}
-
-pub struct WalManager {
-    blocks: u32,
-    active_block: u32,
-}
-
-pub struct WalRecord {
-    sequence_number: u64,
-    operation: Operation,
-}
-
-pub struct FragmentHeader {
-    chekcsum: u32,
-    fragment: FragmentType,
-    payload_length: u32,
-}
-
-enum Operation {
-    Put {
-        key: Vec<u8>,
-        value: Option<Vec<u8>>,
-    },
-    Delete {
-        key: Vec<u8>,
-    },
-    Create{column: String},
-    Append,
-    Write,
-    SingleDelete,
-}
-
-enum FragmentType {
-    Full,
-    First,
-    Middle,
-    Last,
-}
-
-impl WalManager {
-    fn write() {}
-    fn read() {}
-}
-
-impl Wal {
-    fn new(dir: PathBuf, version: usize) -> Self {
-        let wal_path = dir.join(format!("wal{}", version));
-
-        let f = File::create_new(wal_path).unwrap();
-
-        Self {
-            file: f,
-            size: 0,
-            enabled: false,
-            version: version,
-        }
-    }
-
-    fn disable_wal(&mut self) {
-        self.enabled = false
-    }
-}
 
 pub struct Engine {
     wal: Wal,
@@ -114,9 +42,9 @@ pub struct Engine {
     frozen_memtables: Option<VecDeque<Arc<MemTable>>>,
 }
 
-pub struct SSTfile { 
-    index_block: Vec<u8>, 
-    filter_block: Vec<u8>, 
+pub struct SSTfile {
+    index_block: Vec<u8>,
+    filter_block: Vec<u8>,
     magic: u64,
     data_size: u64,
 }
