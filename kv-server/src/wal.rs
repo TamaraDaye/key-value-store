@@ -1,12 +1,12 @@
 #![allow(unused)]
 
 use crate::DbPaths;
-use crc32c::crc32c;
+use crc32c;
 use protocol::BinCodec;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Deserializer, Serializer, de::Error};
 use std::fmt::Write;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, BufWriter, Read};
 use std::os::fd;
 use std::path::PathBuf;
 
@@ -15,46 +15,68 @@ const SEGMENT_SIZE: usize = 16 << 20;
 const HEADER_SIZE: usize = 7; 
 const MAX_RECORD_SIZE: usize = 8 << 20;
 
-pub fn generate_checksum(fragment_type: FragmentType, payload: &[u8]) -> Result<u32, String> {
-    let length = u16::try_from(payload.len()).unwrap();
+pub fn generate_checksum(fragment_type: FragmentType, record: &[u8]) -> Result<u32, String> {
+    let length = u16::try_from(record.len())
+        .map_err(|_| format!("record length {} exceeds u16::MAX", record.len()))?;
 
-    let mut input = Vec::with_capacity(3 + payload.len());
-    input.push(fragment_type as u8);
-    input.extend_from_slice(&length.to_le_bytes());
-    input.extend_from_slice(payload);
+    let [len_lo, len_hi] = length.to_le_bytes();
 
-    Ok(crc32c(&input))
+    let header = [fragment_type as u8, len_lo, len_hi];
+
+    let crc = crc32c::crc32c(&header);
+
+    let crc = crc32c::crc32c_append(crc, record);
+
+    Ok(crc)
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct FragmentHeader {
     pub fragment: FragmentType,
-    pub payload_length: u16,
+    pub record_length: u16,
     pub checksum: u32,
 }
 
 
 impl FragmentHeader {
-    fn new(fragment: FragmentType, payload_length: u16, payload: &[u8]) -> Self {
-        let checksum = generate_checksum(fragment.clone(), payload).unwrap();
-        Self {
-            fragment,
-            payload_length,
-            checksum,
-        }
+    fn new(fragment: FragmentType, record_length: u16, record: &[u8]) -> [u8; 7] {
+        let checksum = generate_checksum(fragment, record).unwrap();
+        let mut header = [0u8; 7];
+        header[0] =  fragment as u8;
+        header[1..3].copy_from_slice(&record_length.to_le_bytes());
+        header[3..].copy_from_slice(&checksum.to_le_bytes());
+
+        header
     }
 }
 
-impl BinCodec for FragmentHeader {}
 
 #[repr(u8)]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FragmentType {
     Full = 1,
     First = 2,
     Middle = 3,
     Last = 4,
 }
+
+
+impl TryFrom<u8> for FragmentType {
+    type Error = u8;
+
+
+    #[inline]
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match  value  {
+            1 => Ok(FragmentType::Full),  
+            2 => Ok(FragmentType::First),  
+            3 => Ok(FragmentType::Middle),  
+            4 => Ok(FragmentType::Last),  
+            invalid => Err(invalid)
+
+        }
+    }
+}
+
 
 impl BinCodec for Operation{}
 
@@ -70,32 +92,72 @@ pub enum Operation {
 
 
 pub struct LogWriter {
-    log_file: LogFile,
+    log_file: BufWriter<File>,
     block_offset: usize
 }
 
 pub struct LogReader {
-    log_file: LogFile,
-    block_offset: usize
+    log_file: BufReader<File>,
+    block_offset: usize,
+    last_record_offset: usize
 }
 
 
-pub struct LogFile{
-    file: File,
-}
+impl LogReader {
+    fn read_record(&mut self) -> WalRecord {
+        let mut header: [u8; 7] = [0; 7];
+        let in_fragmented_record = false;
+        let record: Vec<u8> = vec![];
+        let mut scratch: Vec<u8> = vec![];
+
+        loop {
+            self.read_physical_record(HEADER_SIZE, &mut header);
+            let fragment_type = FragmentType::try_from(header[0]).unwrap();
+            let length =  u16::from_le_bytes([header[1], header[2]]);
 
 
-impl LogFile {
-    fn new(path: PathBuf) -> Self { todo!()}
-    fn append(&mut self, length: usize, data: &[u8]) {
+            match fragment_type {
+                FragmentType::First => {
+
+                }
+
+                FragmentType::Middle => {
+                    
+                }
+
+                FragmentType::Last => {
+
+                }
+
+                FragmentType::Full => {
+                    self.read_physical_record(length as usize, &mut scratch);
+                    return WalRecord::deserialize_record(&scratch).unwrap();
+                }
+
+            }
+        }
         
     }
-    fn close(&self) {}
 
-    fn flush(&self){}
 
-    fn sync(&self){}
+    fn read_physical_record(&mut self, length: usize, buffer: &mut [u8]) {
+        let mut read = 0;
+
+
+        while buffer.len() < length {
+            read =  self.log_file.read(buffer).unwrap();
+
+            if read == 0 {
+                return 
+            }
+
+        }
+    }
 }
+
+
+
+
 
 
 impl LogWriter {
@@ -112,6 +174,7 @@ impl LogWriter {
                 if (leftover > 0) {
                     let padding = vec![0u8; leftover];
                     self.log_file.append(leftover, &padding);
+                    //TODO: fix log file methods use buf reader and write
                 }
 
                 self.block_offset = 0
@@ -150,13 +213,24 @@ impl LogWriter {
     }
 
     fn emit_record(&mut self, fragment_type: FragmentType, record: &[u8],  length: u16) {
-        let fragment = FragmentHeader::new(fragment_type, length, record).serialize_record().unwrap();
+        let fragment = FragmentHeader::new(fragment_type, length, record);
 
-        self.log_file.append(fragment.len(), &fragment);
-        self.log_file.append(length as usize, record);
-        self.log_file.flush();
-        self.block_offset += HEADER_SIZE + length as usize;
+        //TODO: fix log file methods use buf reader and write
+        // self.log_file.append(fragment.len(), &fragment);
+        // self.log_file.append(length as usize, record);
+        // self.log_file.flush();
+        // self.block_offset += HEADER_SIZE + length as usize;
     }
+
+    fn new(path: PathBuf) -> Self { todo!()}
+    fn append(&mut self, length: usize, data: &[u8]) {
+        
+    }
+    fn close(&self) {}
+
+    fn flush(&self){}
+
+    fn sync(&self){}
 
 }
 
