@@ -1,5 +1,5 @@
 #![allow(unused)]
-use protocol::{Request, Response, SerdeData, Server, View};
+use protocol::{Request, Response, JsonCodec, Server, View};
 use std::collections::HashMap;
 use std::error;
 use std::net::SocketAddr;
