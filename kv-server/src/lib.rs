@@ -7,10 +7,6 @@ pub mod sst;
 use std::path::PathBuf;
 use crc32c::crc32c;
 
-pub fn generate_checksum() {
-    let checksum = 
-}
-
 struct DbPaths {
     root: PathBuf,
     wal_dir: PathBuf,

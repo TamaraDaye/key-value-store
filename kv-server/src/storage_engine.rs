@@ -6,7 +6,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::cell::Cell;
-use crate::wal::Wal;
 
 
 const MAX_HEIGHT: usize = 16;
@@ -36,7 +35,6 @@ pub struct RowEntry {
 
 
 pub struct Engine {
-    wal: Wal,
     ssfile: SSTfile,
     active_memtable: MemTable,
     frozen_memtables: Option<VecDeque<Arc<MemTable>>>,
@@ -164,6 +162,10 @@ impl MemTable {
     }
 
     pub fn delete(&mut self, key: &[u8]) {
+        let (mut update, exact_match) = self.find_predecessors(key);
+
+        if let Some(existing_idx) = exact_match {
+        }
         todo!()
     }
 

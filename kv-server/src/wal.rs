@@ -63,7 +63,6 @@ enum FragmentType {
 impl TryFrom<u8> for FragmentType {
     type Error = u8;
 
-
     #[inline]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match  value  {
@@ -76,7 +75,6 @@ impl TryFrom<u8> for FragmentType {
         }
     }
 }
-
 
 impl BinCodec for Operation{}
 
@@ -91,47 +89,70 @@ pub enum Operation {
 }
 
 
-pub struct LogWriter {
-    log_file: BufWriter<File>,
+pub struct WalWriter<W : std::io::Write>{
+    log_file: BufWriter<W>,
     block_offset: usize
 }
 
-pub struct LogReader {
-    log_file: BufReader<File>,
+pub struct WalReader <R: Read >{
+    log_file: BufReader<R>,
+    block: [u8; BLOCK_SIZE], 
+    block_length: usize,
     block_offset: usize,
     last_record_offset: usize
 }
 
 
-impl LogReader {
-    fn read_record(&mut self) -> WalRecord {
-        let mut header: [u8; 7] = [0; 7];
-        let in_fragmented_record = false;
-        let record: Vec<u8> = vec![];
-        let mut scratch: Vec<u8> = vec![];
+//TODO: implement iterator for wal 
+pub struct WalReaderItertor {}
+
+
+impl Iterator for WalReaderItertor {
+    type Item = WalRecord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+       todo!(); 
+    }
+}
+
+
+impl < R: Read > WalReader<R>  {
+    fn read_record(&mut self) -> Option<WalRecord> {
+        let mut in_fragmented_record = false;
+        let mut record: Vec<u8> = vec![];
 
         loop {
-            self.read_physical_record(HEADER_SIZE, &mut header);
+            let (header, offset) = self.read_physical_record();
             let fragment_type = FragmentType::try_from(header[0]).unwrap();
             let length =  u16::from_le_bytes([header[1], header[2]]);
 
 
             match fragment_type {
                 FragmentType::First => {
-
+                    in_fragmented_record = true;
+                    record.extend_from_slice(&self.block[offset + HEADER_SIZE..length as usize]);
                 }
 
                 FragmentType::Middle => {
-                    
+                    if !in_fragmented_record {
+                        return None;
+                    }
+                    record.extend_from_slice(&self.block[offset + HEADER_SIZE..length as usize]);
                 }
 
                 FragmentType::Last => {
-
+                    if !in_fragmented_record {
+                        return None;
+                    }
+                    record.extend_from_slice(&self.block[offset + HEADER_SIZE..length as usize]);
+                    self.last_record_offset += HEADER_SIZE + length as usize;
+                    return Some(WalRecord::deserialize_record(&record).unwrap());
                 }
 
                 FragmentType::Full => {
-                    self.read_physical_record(length as usize, &mut scratch);
-                    return WalRecord::deserialize_record(&scratch).unwrap();
+                    let record = &self.block[offset + HEADER_SIZE..length as usize];
+                    self.last_record_offset += HEADER_SIZE + length as usize;
+                    return Some(WalRecord::deserialize_record(&record).unwrap())
                 }
 
             }
@@ -139,28 +160,41 @@ impl LogReader {
         
     }
 
+    //TODO: need proper error handling up in here
+    fn read_physical_record(&mut self) -> (&[u8], usize) {
+        if  self.block_length - self.block_offset < HEADER_SIZE {
+            self.block_length = 0;
+            self.block_offset = 0;
+            self.read_block();
+        } 
 
-    fn read_physical_record(&mut self, length: usize, buffer: &mut [u8]) {
+        let header = &self.block[self.block_offset ..self.block_offset + HEADER_SIZE];
+        let offset = self.block_offset;
+        
+        self.block_offset += HEADER_SIZE + u16::from_le_bytes([header[1], header[2]]) as usize;
+        (header, offset)
+    }
+
+
+    fn read_block(&mut self) {
         let mut read = 0;
-
-
-        while buffer.len() < length {
-            read =  self.log_file.read(buffer).unwrap();
+        loop {
+            read = self.log_file.read(&mut self.block[self.block_length..]).unwrap();
 
             if read == 0 {
-                return 
+                break;
             }
+
+
+            self.block_length += read;
 
         }
     }
 }
 
 
-
-
-
-
-impl LogWriter {
+//TODO: fix wal writer 
+impl <W: std::io::Write> WalWriter<W> {
     fn add_record(&mut self, record: &[u8]) -> Result<(), String > { 
         let mut ptr = 0; 
         let mut left = record.len();
@@ -202,7 +236,7 @@ impl LogWriter {
                 fragment_type = FragmentType::Middle;
             }
 
-            self.emit_record(fragment_type, &record[ptr..fragment_length], fragment_length as u16);
+            self.emit_record(fragment_type, &record[ptr..ptr + fragment_length], fragment_length as u16);
 
             left -=  fragment_length;
             ptr += fragment_length;
@@ -236,7 +270,6 @@ impl LogWriter {
 
 pub struct WalManager {
     blocks: u32,
-    writer: LogWriter
 }
 
 
