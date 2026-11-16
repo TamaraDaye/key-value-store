@@ -6,12 +6,25 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::cell::Cell;
+use std::path::Path;
+
+
+// pub trait Reader: std::io::Read {
+
+//     fn open(data_dir: Option<&Path>);
+//     fn sync(&mut self);
+// }
 
 
 const MAX_HEIGHT: usize = 16;
 const NULL_IDX: u32 = u32::MAX;
 const MEMTABLE_SIZE: usize = 16 << 20;
 const RNG_STATE: usize = 0x853c49e6748fea9b;
+
+pub trait Writer: std::io::Write {
+    fn open(data_dir: Option<&Path>);
+    fn sync_data(&mut self);
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ByteSlice {
@@ -31,7 +44,6 @@ pub struct RowEntry {
     length: u32,
     value: Vec<u8>,
 }
-
 
 
 pub struct Engine {
