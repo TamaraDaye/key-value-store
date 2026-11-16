@@ -1,19 +1,13 @@
 #![allow(unused)]
+use crate::sst::SSTable;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::cell::Cell;
-use std::path::Path;
-
-
-// pub trait Reader: std::io::Read {
-
-//     fn open(data_dir: Option<&Path>);
-//     fn sync(&mut self);
-// }
 
 
 const MAX_HEIGHT: usize = 16;
@@ -38,34 +32,47 @@ pub enum ValueEntry {
     #[default]
     Tombstone,
 }
-pub struct RowEntry {
-    key_length: u32,
-    key: Vec<u8>,
-    length: u32,
-    value: Vec<u8>,
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpType {
+    Put = 1,
+    Delete = 2,
 }
 
+impl TryFrom<u8> for OpType {
+    type Error = u8;
 
-pub struct Engine {
-    ssfile: SSTfile,
+    #[inline]
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(OpType::Put),
+            2 => Ok(OpType::Delete),
+            invalid => Err(invalid),
+        }
+    }
+}
+
+pub struct TableEntry<'a> {
+    pub op_type: OpType,
+    pub key_bytes: &'a [u8],
+    pub seq_num: u64,
+    pub value_bytes: &'a [u8],
+}
+
+pub struct Engine <W: Writer>{
+    ssfile: SSTable<W>,
     active_memtable: MemTable,
     frozen_memtables: Option<VecDeque<Arc<MemTable>>>,
 }
-
-pub struct SSTfile {
-    index_block: Vec<u8>,
-    filter_block: Vec<u8>,
-    magic: u64,
-    data_size: u64,
-}
-
 pub struct SkipNode {
     pub key: ByteSlice,
     pub value: ValueEntry,
+    pub seq_number: u64,
     pub height: u8,
     pub next: [u32; MAX_HEIGHT],
-    pub seq_number: u32,
 }
+
 
 pub struct MemTable {
     column_family: String,
@@ -75,18 +82,54 @@ pub struct MemTable {
     rng_state: usize,
 }
 
+pub struct MemTableIterator<'a> {
+    curr_node: usize,
+    mem_table: &'a MemTable,
+}
+
+impl<'a> Iterator for MemTableIterator<'a> {
+    type Item = TableEntry<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr_node == NULL_IDX as usize {
+            return None;
+        }
+
+        let next_idx = self.mem_table.nodes[self.curr_node].next[0] as usize;
+
+        self.curr_node = next_idx;
+
+        if next_idx == NULL_IDX as usize {
+            return None;
+        }
+
+        let node = &self.mem_table.nodes[next_idx];
+        let (op_type, value_bytes) = match node.value {
+            ValueEntry::Value(slice) => (OpType::Put, self.mem_table.get_bytes(slice)),
+            ValueEntry::Tombstone => (OpType::Delete, &[][..]),
+        };
+
+        let key_bytes = self.mem_table.get_bytes(node.key);
+
+        Some(TableEntry {
+            op_type,
+            key_bytes,
+            seq_num: node.seq_number as u64,
+            value_bytes,
+        })
+    }
+}
 impl MemTable {
     pub fn new(capacity_bytes: usize, column_family: String) -> Self {
         let head = SkipNode {
             key: ByteSlice::default(),
             value: ValueEntry::Tombstone,
+            seq_number: 0,
             height: MAX_HEIGHT as u8,
             next: [NULL_IDX; MAX_HEIGHT],
-            seq_number: 0,
         };
 
         let mut nodes = Vec::with_capacity(4096);
-
         nodes.push(head);
 
         Self {
@@ -95,6 +138,13 @@ impl MemTable {
             current_max_height: 1,
             rng_state: RNG_STATE,
             column_family,
+        }
+    }
+
+    pub fn iter(&self) -> MemTableIterator<'_> {
+        MemTableIterator {
+            curr_node: 0,
+            mem_table: self,
         }
     }
 
@@ -128,7 +178,17 @@ impl MemTable {
         height.min(MAX_HEIGHT)
     }
 
-    fn find_predecessors(&self, target_key: &[u8]) -> ([u32; MAX_HEIGHT], Option<u32>) {
+    #[inline]
+    fn compare_internal_key(
+        a_key: &[u8],
+        a_seq: u64,
+        b_key: &[u8],
+        b_seq: u64,
+    ) -> Ordering {
+        a_key.cmp(b_key).then_with(|| b_seq.cmp(&a_seq))
+    }
+
+    fn find_predecessors(&self, target_key: &[u8], target_seq: u64) -> [u32; MAX_HEIGHT] {
         let mut update = [0u32; MAX_HEIGHT];
         let mut curr = 0u32;
 
@@ -137,66 +197,46 @@ impl MemTable {
                 let next = self.nodes[curr as usize].next[level];
                 if next == NULL_IDX {
                     break;
-                };
-                let next_key = self.get_bytes(self.nodes[next as usize].key);
+                }
 
-                match next_key.cmp(target_key) {
+                let next_node = &self.nodes[next as usize];
+                let next_key = self.get_bytes(next_node.key);
+
+                match Self::compare_internal_key(
+                    next_key,
+                    next_node.seq_number,
+                    target_key,
+                    target_seq,
+                ) {
                     Ordering::Less => curr = next,
-                    Ordering::Equal => {
-                        update[level] = curr;
-                        if level == 0 {
-                            return (update, Some(next));
-                        }
-                        break;
-                    }
-                    Ordering::Greater => break,
+                    Ordering::Equal | Ordering::Greater => break,
                 }
             }
             update[level] = curr;
         }
 
-        let candidate = self.nodes[curr as usize].next[0];
-
-        let exact_match = if candidate != NULL_IDX
-            && self.get_bytes(self.nodes[candidate as usize].key) == target_key
-        {
-            Some(candidate)
-        } else {
-            None
-        };
-
-        (update, exact_match)
+        update
     }
 
-    pub fn put(&mut self, key: &[u8], value: &[u8]) {
+    pub fn put(&mut self, key: &[u8], value: &[u8], seq_num: u64) {
         let val_slice = self.alloc_bytes(value);
-        self.insert_entry(key, ValueEntry::Value(val_slice));
+        self.insert_entry(key, seq_num, ValueEntry::Value(val_slice));
     }
 
-    pub fn delete(&mut self, key: &[u8]) {
-        let (mut update, exact_match) = self.find_predecessors(key);
-
-        if let Some(existing_idx) = exact_match {
-        }
-        todo!()
+    pub fn delete(&mut self, key: &[u8], seq_num: u64) {
+        self.insert_entry(key, seq_num, ValueEntry::Tombstone);
     }
 
-    fn insert_entry(&mut self, key: &[u8], value_entry: ValueEntry) {
-        let (mut update, exact_match) = self.find_predecessors(key);
-
-        if let Some(existing_idx) = exact_match {
-            self.nodes[existing_idx as usize].value = value_entry;
-            return;
-        }
-
+    fn insert_entry(&mut self, key: &[u8], seq_num: u64, value_entry: ValueEntry) {
+        let mut update = self.find_predecessors(key, seq_num);
         let height = self.random_height();
 
         if height > self.current_max_height {
             for level in self.current_max_height..height {
-                update[level] = 0
+                update[level] = 0;
             }
             self.current_max_height = height;
-        };
+        }
 
         let key_slice = self.alloc_bytes(key);
         let new_node_idx = self.nodes.len() as u32;
@@ -204,8 +244,8 @@ impl MemTable {
         let mut new_node = SkipNode {
             key: key_slice,
             value: value_entry,
+            seq_number: seq_num,
             height: height as u8,
-            seq_number: 0,
             next: [NULL_IDX; MAX_HEIGHT],
         };
 
@@ -217,4 +257,10 @@ impl MemTable {
 
         self.nodes.push(new_node);
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 }
